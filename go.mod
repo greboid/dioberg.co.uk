@@ -1,3 +1,3 @@
-module diober-new
+module github.com/greboid/dioberg.co.uk
 
-go 1.15
+go 1.16
