@@ -2,39 +2,39 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"html/template"
-	"io/ioutil"
+	"embed"
+	"io/fs"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"time"
+
+	"github.com/gorilla/handlers"
+	"github.com/gorilla/mux"
 )
 
-var templates = template.Must(template.ParseFiles(
-	"./templates/main.css",
-	"./templates/index.html",
-))
-
-var images []string
+//go:embed static
+var staticfs embed.FS
 
 func main() {
-	rand.Seed(time.Now().Unix())
-	getImages()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", indexHandler)
-	mux.HandleFunc("/css", cssHandler)
-	mux.Handle("/images/", checkWebP(http.FileServer(http.Dir("./"))))
+	staticFiles, err := fs.Sub(staticfs, "static")
+	if err != nil {
+		log.Fatalf("Error: %s", err)
+	}
+	router := mux.NewRouter()
+	router.Use(handlers.ProxyHeaders)
+	router.Use(handlers.CompressHandler)
+	router.Use(NewLoggingHandler(os.Stdout))
+	router.PathPrefix("/").Handler(NotFoundHandler(CheckWebP(http.FileServer(http.FS(staticFiles)), staticFiles), staticFiles))
 
 	log.Print("Starting server.")
 	server := http.Server{
-		Addr:              ":8080",
-		Handler:           requestLogger(mux),
+		Addr:    ":8080",
+		Handler: router,
 	}
-	go func(){
+	go func() {
 		_ = server.ListenAndServe()
 	}()
 	stop := make(chan os.Signal, 1)
@@ -48,64 +48,15 @@ func main() {
 	log.Print("Finishing server.")
 }
 
-func requestLogger(targetMux http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		targetMux.ServeHTTP(w, r)
-		requesterIP := r.RemoteAddr
-		log.Printf(
-			"%s\t\t%s\t\t%s\t",
-			requesterIP,
-			r.Method,
-			r.RequestURI,
-		)
-	})
-}
-
-func checkWebP(fn http.Handler) http.Handler {
-	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		if webp := strings.Contains(req.Header.Get("Accept"),"image/webp"); webp {
-			webp := req.URL.Path + ".webp"
-			_, err := os.Stat(fmt.Sprintf("./%s", webp))
+func CheckWebP(h http.Handler, files fs.FS) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Accept"), "image/webp") {
+			webp := r.URL.Path + ".webp"
+			_, err := files.Open(strings.TrimPrefix(webp, "/"))
 			if err == nil {
-				req.URL.Path = webp
+				r.URL.Path = webp
 			}
 		}
-		fn.ServeHTTP(rw, req)
-	})
-}
-
-func getImages() {
-	files, err := ioutil.ReadDir("./images")
-	if err != nil {
-		log.Fatal(err)
-	}
-	for _, f := range files {
-		images = append(images, f.Name())
+		h.ServeHTTP(w, r)
 	}
 }
-
-func cssHandler(writer http.ResponseWriter, _ *http.Request) {
-	writer.Header().Set("Content-Type", "text/css; charset=utf-8")
-	err := templates.ExecuteTemplate(writer, "main.css", images[rand.Intn(len(images))])
-	if err != nil {
-		log.Printf("Fucked up: %s", err.Error())
-		writer.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-}
-
-func indexHandler(writer http.ResponseWriter, request *http.Request) {
-	if request.URL.Path == "/" {
-		err := templates.ExecuteTemplate(writer, "index.html", "")
-		if err != nil {
-			log.Printf("Fucked up: %s", err.Error())
-			writer.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-	} else {
-		writer.WriteHeader(http.StatusNotFound)
-	}
-}
-
-
-
